@@ -74,6 +74,49 @@ class WaveFront:
         # Blit en la pantalla
         surface.blit(temp_surface, (screen_x - screen_radius - 2, screen_y - screen_radius - 2))
 
+def calculate_ideal_orbital_velocity(position, sun_mass):
+    """Calcula la velocidad orbital ideal para una órbita circular perfecta."""
+    r = np.linalg.norm(position)
+    if r < 1:
+        return np.zeros(2, dtype=float)
+    
+    # Velocidad orbital circular: v = sqrt(GM/r)
+    v_magnitude = math.sqrt(G * sun_mass / r)
+    
+    # Dirección tangencial (perpendicular al radio)
+    theta = math.atan2(position[1], position[0])
+    v_ideal = np.array([
+        -math.sin(theta) * v_magnitude,
+        math.cos(theta) * v_magnitude
+    ], dtype=float)
+    
+    return v_ideal
+
+def calculate_theoretical_doppler(earth, body, sun_mass):
+    """Calcula el Doppler teórico si el planeta estuviera en órbita circular perfecta."""
+    # Velocidad ideal del planeta
+    v_ideal_body = calculate_ideal_orbital_velocity(body.pos, sun_mass)
+    
+    # Velocidad ideal de la Tierra
+    v_ideal_earth = calculate_ideal_orbital_velocity(earth.pos, sun_mass)
+    
+    # Vector Tierra -> Planeta
+    diff = body.pos - earth.pos
+    dist = np.linalg.norm(diff)
+    
+    if dist < 0.1:
+        return FREQ_BASE, 0
+    
+    unit_vec = diff / dist
+    
+    # Velocidad radial teórica (usando velocidades ideales)
+    vel_radial_ideal = np.dot(v_ideal_body - v_ideal_earth, unit_vec)
+    
+    # Frecuencia Doppler teórica
+    freq_theoretical = FREQ_BASE * C_LUZ_ESCALADA / (C_LUZ_ESCALADA + vel_radial_ideal)
+    
+    return freq_theoretical, vel_radial_ideal
+
 class DopplerAnalyzer:
     """Analyzes Doppler effect from Earth to predict collisions."""
     def __init__(self, earth, body1, body2):
@@ -93,14 +136,14 @@ class DopplerAnalyzer:
         self.anomaly_level = 0  # 0: normal, 1: mild, 2: moderate, 3: severe
         
     def calculate_doppler_shift(self):
-        """Calculates Doppler shift observed from Earth."""
+        """Calculates Doppler shift observed from Earth and compares with theoretical."""
         diff = self.body2.pos - self.body1.pos
         dist = np.linalg.norm(diff)
         
         if dist < 0.1:
-            return 0, 0, 0, 0, dist, True
+            return 0, 0, 0, 0, dist, True, 0, 0
         
-        # Doppler from Earth to Body 1
+        # Doppler REAL from Earth to Body 1
         diff_earth_b1 = self.body1.pos - self.earth.pos
         dist_earth_b1 = np.linalg.norm(diff_earth_b1)
         
@@ -116,7 +159,7 @@ class DopplerAnalyzer:
             vel_radial_b1 = 0
             freq_b1 = FREQ_BASE
         
-        # Doppler from Earth to Body 2
+        # Doppler REAL from Earth to Body 2
         diff_earth_b2 = self.body2.pos - self.earth.pos
         dist_earth_b2 = np.linalg.norm(diff_earth_b2)
         
@@ -128,6 +171,10 @@ class DopplerAnalyzer:
         else:
             vel_radial_b2 = 0
             freq_b2 = FREQ_BASE
+        
+        # Calcular Doppler TEÓRICO (órbita circular ideal)
+        freq_theoretical_b1, _ = calculate_theoretical_doppler(self.earth, self.body1, SOLAR_MASS)
+        freq_theoretical_b2, _ = calculate_theoretical_doppler(self.earth, self.body2, SOLAR_MASS)
         
         vel_rel = self.body2.vel - self.body1.vel
         unit_vec = diff / dist
@@ -142,52 +189,45 @@ class DopplerAnalyzer:
             'doppler_b1': doppler_shift_b1,
             'doppler_b2': doppler_shift_b2,
             'vel_radial_b1': vel_radial_b1,
-            'vel_radial_b2': vel_radial_b2
+            'vel_radial_b2': vel_radial_b2,
+            'freq_theoretical_b1': freq_theoretical_b1,
+            'freq_theoretical_b2': freq_theoretical_b2
         })
         
-        if self.baseline_doppler_b1 is None and len(self.history) > 20:
-            self.baseline_doppler_b1 = np.mean([h['doppler_b1'] for h in self.history])
-            self.baseline_doppler_b2 = np.mean([h['doppler_b2'] for h in self.history])
-        
-        self.detect_orbital_anomaly(doppler_shift_b1, doppler_shift_b2, vel_radial_b1, vel_radial_b2)
+        self.detect_orbital_anomaly(doppler_shift_b1, doppler_shift_b2, vel_radial_b1, vel_radial_b2, 
+                                   freq_theoretical_b1, freq_theoretical_b2)
         self.analyze_collision_risk(dist, radial_velocity)
         
-        return doppler_shift_b1, doppler_shift_b2, vel_radial_b1, vel_radial_b2, dist, self.collision_imminent
+        return doppler_shift_b1, doppler_shift_b2, vel_radial_b1, vel_radial_b2, dist, self.collision_imminent, freq_theoretical_b1, freq_theoretical_b2
     
-    def detect_orbital_anomaly(self, doppler_b1, doppler_b2, vrad_b1, vrad_b2):
-        if self.baseline_doppler_b1 is None:
-            self.orbital_anomaly_detected = False
-            self.anomaly_level = 0
-            return
+    def detect_orbital_anomaly(self, doppler_b1, doppler_b2, vrad_b1, vrad_b2, freq_theoretical_b1, freq_theoretical_b2):
+        """Detecta anomalías comparando frecuencia real vs teórica (Planeta Fantasma)."""
+        # Calcular desviación respecto a la órbita ideal
+        freq_real_b1 = FREQ_BASE + doppler_b1
+        freq_real_b2 = FREQ_BASE + doppler_b2
         
-        deviation_b1 = abs(doppler_b1 - self.baseline_doppler_b1)
-        deviation_b2 = abs(doppler_b2 - self.baseline_doppler_b2)
+        deviation_b1 = abs(freq_real_b1 - freq_theoretical_b1)
+        deviation_b2 = abs(freq_real_b2 - freq_theoretical_b2)
         
-        abnormal_vel_b1 = abs(vrad_b1) > 3.0
-        abnormal_vel_b2 = abs(vrad_b2) > 3.0
+        # Umbrales de anomalía basados en diferencia teórica-real
+        THRESHOLD_SEVERE = 3.0  # Hz
+        THRESHOLD_MODERATE = 1.5  # Hz
+        THRESHOLD_MILD = 0.5  # Hz
         
-        if len(self.history) > 30:
-            recent_doppler_b1 = [h['doppler_b1'] for h in list(self.history)[-30:]]
-            recent_doppler_b2 = [h['doppler_b2'] for h in list(self.history)[-30:]]
-            
-            doppler_change_b1 = max(recent_doppler_b1) - min(recent_doppler_b1)
-            doppler_change_b2 = max(recent_doppler_b2) - min(recent_doppler_b2)
-            
-            if (deviation_b1 > 15 or deviation_b2 > 15) or (abnormal_vel_b1 or abnormal_vel_b2):
-                self.orbital_anomaly_detected = True
-                self.anomaly_level = 3
-            elif (deviation_b1 > 8 or deviation_b2 > 8) or (doppler_change_b1 > 10 or doppler_change_b2 > 10):
-                self.orbital_anomaly_detected = True
-                self.anomaly_level = 2
-            elif deviation_b1 > 4 or deviation_b2 > 4:
-                self.orbital_anomaly_detected = True
-                self.anomaly_level = 1
-            else:
-                self.orbital_anomaly_detected = False
-                self.anomaly_level = 0
+        max_deviation = max(deviation_b1, deviation_b2)
+        
+        if max_deviation > THRESHOLD_SEVERE:
+            self.orbital_anomaly_detected = True
+            self.anomaly_level = 3  # Severa
+        elif max_deviation > THRESHOLD_MODERATE:
+            self.orbital_anomaly_detected = True
+            self.anomaly_level = 2  # Moderada
+        elif max_deviation > THRESHOLD_MILD:
+            self.orbital_anomaly_detected = True
+            self.anomaly_level = 1  # Leve
         else:
             self.orbital_anomaly_detected = False
-            self.anomaly_level = 0
+            self.anomaly_level = 0  # Normal
     
     def analyze_collision_risk(self, current_dist, radial_velocity):
         collision_distance = self.body1.radius + self.body2.radius + 5
@@ -490,8 +530,8 @@ def update_and_draw_wave_fronts(screen, wave_fronts, scale, offset, dt):
     # Eliminar pulsos muertos
     wave_fronts[:] = [w for w in wave_fronts if w.alive]
 
-def draw_wave_visualization(screen, earth, selected_planet, is_perturbed, frame_count):
-    """Dibuja ondas sinusoidales mostrando efecto Doppler normal vs perturbado."""
+def draw_wave_visualization(screen, earth, selected_planet, is_perturbed, frame_count, frequency_history):
+    """Dibuja señal observada por la Tierra en tiempo real y su evolución temporal."""
     if selected_planet is None:
         return
     
@@ -511,10 +551,10 @@ def draw_wave_visualization(screen, earth, selected_planet, is_perturbed, frame_
     
     # Título
     font_wave = pygame.font.SysFont("Arial", 14, bold=True)
-    title = font_wave.render("VISUALIZACIÓN DE ONDAS DOPPLER", True, (100, 200, 255))
+    title = font_wave.render("SEÑAL DOPPLER OBSERVADA DESDE LA TIERRA", True, (100, 200, 255))
     screen.blit(title, (wave_panel_x + 10, wave_panel_y + 8))
     
-    # Calcular frecuencias
+    # Calcular frecuencia observada EN TIEMPO REAL
     diff_earth_planet = selected_planet.pos - earth.pos
     dist_earth_planet = np.linalg.norm(diff_earth_planet)
     
@@ -528,106 +568,143 @@ def draw_wave_visualization(screen, earth, selected_planet, is_perturbed, frame_
     
     doppler_shift = freq_observed - FREQ_BASE
     
-    # Área de dibujo de ondas
+    # Guardar en historial
+    frequency_history.append(freq_observed)
+    if len(frequency_history) > 200:
+        frequency_history.pop(0)
+    
+    # Calcular frecuencia TEÓRICA (órbita ideal)
+    freq_theoretical, vel_radial_ideal = calculate_theoretical_doppler(earth, selected_planet, SOLAR_MASS)
+    doppler_deviation = abs(freq_observed - freq_theoretical)
+    
+    # --- ONDAS SUPERPUESTAS: Teórica vs Observada ---
     wave_draw_y = wave_panel_y + 35
-    wave_height = 110
-    wave_center_y1 = wave_draw_y + wave_height // 2
-    wave_center_y2 = wave_draw_y + wave_height + 50 + wave_height // 2
+    wave_height = 90
+    wave_center_y = wave_draw_y + wave_height // 2
     
-    # --- ONDA NORMAL (baseline) ---
     font_label = pygame.font.SysFont("Consolas", 11)
-    if not is_perturbed:
-        label = font_label.render(f"Señal Base: {FREQ_BASE:.1f} Hz (sin perturbación)", True, (100, 255, 100))
-    else:
-        label = font_label.render(f"Señal Base Original: {FREQ_BASE:.1f} Hz", True, (150, 150, 150))
-    screen.blit(label, (wave_panel_x + 15, wave_draw_y - 5))
     
-    # Dibujar onda normal (verde) - ANIMADA EN TIEMPO REAL
-    points_normal = []
+    # Determinar si hay anomalía
+    if doppler_deviation > 3.0:
+        anomaly_status = "ANOMALÍA SEVERA"
+        color_observed = (255, 50, 50)
+    elif doppler_deviation > 1.5:
+        anomaly_status = "ANOMALÍA MODERADA"
+        color_observed = (255, 180, 0)
+    elif doppler_deviation > 0.5:
+        anomaly_status = "Desviación leve"
+        color_observed = (255, 255, 100)
+    else:
+        anomaly_status = "Órbita normal"
+        color_observed = (100, 255, 100)
+    
+    # Labels
+    label1 = font_label.render(f"Teórica (órbita circular): {freq_theoretical:.2f} Hz", True, (150, 150, 150))
+    screen.blit(label1, (wave_panel_x + 15, wave_draw_y - 20))
+    
+    label2 = font_label.render(f"Observada: {freq_observed:.2f} Hz | Δ = {doppler_deviation:.2f} Hz", True, color_observed)
+    screen.blit(label2, (wave_panel_x + 15, wave_draw_y - 5))
+    
+    anomaly_label = font_label.render(f"Estado: {anomaly_status}", True, color_observed)
+    screen.blit(anomaly_label, (wave_panel_x + 15, wave_draw_y + wave_height + 5))
+    
     wave_width = wave_panel_width - 30
     amplitude = 35
-    frequency_visual = 4  # Ciclos visuales
+    frequency_visual_base = 4
     
-    # Animación de fase para onda normal
-    phase_shift_normal = (frame_count * 0.08) % (2 * math.pi)
+    # --- ONDA TEÓRICA (Gris punteada) ---
+    points_theoretical = []
+    freq_ratio_theoretical = freq_theoretical / FREQ_BASE
+    frequency_visual_theoretical = frequency_visual_base * freq_ratio_theoretical
+    phase_speed_theoretical = 0.08 * freq_ratio_theoretical
+    phase_shift_theoretical = (frame_count * phase_speed_theoretical) % (2 * math.pi)
+    
+    for x in range(0, wave_width, 3):  # Punteada: cada 3 píxeles
+        angle = (x / wave_width) * frequency_visual_theoretical * 2 * math.pi + phase_shift_theoretical
+        y = wave_center_y + amplitude * math.sin(angle)
+        points_theoretical.append((wave_panel_x + 15 + x, int(y)))
+    
+    if len(points_theoretical) > 1:
+        for i in range(len(points_theoretical) - 1):
+            pygame.draw.line(screen, (120, 120, 120), points_theoretical[i], points_theoretical[i+1], 2)
+    
+    # --- ONDA OBSERVADA (Color sólido) ---
+    points_observed = []
+    freq_ratio_observed = freq_observed / FREQ_BASE
+    frequency_visual_observed = frequency_visual_base * freq_ratio_observed
+    phase_speed_observed = 0.08 * freq_ratio_observed
+    phase_shift_observed = (frame_count * phase_speed_observed) % (2 * math.pi)
     
     for x in range(wave_width):
-        angle = (x / wave_width) * frequency_visual * 2 * math.pi + phase_shift_normal
-        y = wave_center_y1 + amplitude * math.sin(angle)
-        points_normal.append((wave_panel_x + 15 + x, int(y)))
+        angle = (x / wave_width) * frequency_visual_observed * 2 * math.pi + phase_shift_observed
+        y = wave_center_y + amplitude * math.sin(angle)
+        points_observed.append((wave_panel_x + 15 + x, int(y)))
     
-    if len(points_normal) > 1:
-        color_normal = (100, 255, 100) if not is_perturbed else (80, 100, 80)
-        pygame.draw.lines(screen, color_normal, False, points_normal, 2)
+    if len(points_observed) > 1:
+        pygame.draw.lines(screen, color_observed, False, points_observed, 2)
     
-    # Línea central
-    pygame.draw.line(screen, (50, 50, 60), (wave_panel_x + 15, wave_center_y1), 
-                     (wave_panel_x + wave_panel_width - 15, wave_center_y1), 1)
+    # Línea de referencia
+    pygame.draw.line(screen, (80, 80, 90), (wave_panel_x + 15, wave_center_y), 
+                     (wave_panel_x + wave_panel_width - 15, wave_center_y), 1)
     
-    # --- ONDA PERTURBADA (si hay perturbación) ---
-    if is_perturbed:
-        perturbed_y_start = wave_draw_y + wave_height + 35
+    # --- GRÁFICA TEMPORAL DE FRECUENCIA ---
+    graph_y_start = wave_draw_y + wave_height + 20
+    graph_height = 130
+    graph_title = font_label.render("Evolución temporal de la frecuencia:", True, (150, 200, 255))
+    screen.blit(graph_title, (wave_panel_x + 15, graph_y_start))
+    
+    graph_y_start += 20
+    graph_center_y = graph_y_start + graph_height // 2
+    
+    # Línea base (FREQ_BASE = 100 Hz)
+    pygame.draw.line(screen, (100, 100, 100), 
+                     (wave_panel_x + 15, graph_center_y), 
+                     (wave_panel_x + wave_panel_width - 15, graph_center_y), 1)
+    
+    base_label = font_label.render(f"{FREQ_BASE:.0f} Hz", True, (100, 100, 100))
+    screen.blit(base_label, (wave_panel_x + wave_panel_width - 60, graph_center_y - 15))
+    
+    # Dibujar historial de frecuencias
+    if len(frequency_history) > 1:
+        points_history = []
+        for i, freq in enumerate(frequency_history):
+            x = wave_panel_x + 15 + (i * wave_width // max(len(frequency_history) - 1, 1))
+            
+            # Mapear frecuencia a posición Y (escala centrada en FREQ_BASE)
+            freq_deviation = freq - FREQ_BASE
+            y_offset = -freq_deviation * (graph_height / 40)  # Escala: ±20 Hz cubre la mitad
+            y = int(graph_center_y + y_offset)
+            
+            # Limitar a la altura del gráfico
+            y = max(graph_y_start, min(graph_y_start + graph_height, y))
+            
+            points_history.append((x, y))
         
-        # Determinar color según el cambio
-        if abs(doppler_shift) < 2:
-            color_perturbed = (255, 255, 100)  # Amarillo - cambio leve
-            status = "Cambio Leve"
-        elif abs(doppler_shift) < 8:
-            color_perturbed = (255, 180, 0)  # Naranja - cambio moderado
-            status = "Cambio Moderado"
+        # Color del trazo según tendencia
+        if len(frequency_history) > 5:
+            recent_trend = frequency_history[-1] - frequency_history[-5]
+            if recent_trend > 0.5:
+                history_color = (100, 100, 255)  # Azul - aumentando
+            elif recent_trend < -0.5:
+                history_color = (255, 100, 100)  # Rojo - disminuyendo
+            else:
+                history_color = (100, 255, 100)  # Verde - estable
         else:
-            color_perturbed = (255, 50, 50)  # Rojo - cambio severo
-            status = "Cambio Severo"
+            history_color = (100, 255, 100)
         
-        if vel_radial > 0:
-            direction = "Alejándose (Redshift)"
-        elif vel_radial < 0:
-            direction = "Acercándose (Blueshift)"
-        else:
-            direction = "Estable"
-        
-        label_perturbed = font_label.render(f"Señal Perturbada: {freq_observed:.1f} Hz ({status})", True, color_perturbed)
-        screen.blit(label_perturbed, (wave_panel_x + 15, perturbed_y_start - 5))
-        
-        # Dibujar onda perturbada con frecuencia modificada
-        points_perturbed = []
-        freq_ratio = freq_observed / FREQ_BASE
-        frequency_visual_perturbed = frequency_visual * freq_ratio
-        
-        # Animación de fase
-        phase_shift = (frame_count * 0.1) % (2 * math.pi)
-        
-        for x in range(wave_width):
-            angle = (x / wave_width) * frequency_visual_perturbed * 2 * math.pi + phase_shift
-            y = wave_center_y2 + amplitude * math.sin(angle)
-            points_perturbed.append((wave_panel_x + 15 + x, int(y)))
-        
-        if len(points_perturbed) > 1:
-            pygame.draw.lines(screen, color_perturbed, False, points_perturbed, 2)
-        
-        # Línea central
-        pygame.draw.line(screen, (50, 50, 60), (wave_panel_x + 15, wave_center_y2), 
-                         (wave_panel_x + wave_panel_width - 15, wave_center_y2), 1)
-        
-        # Información adicional
-        info_y = perturbed_y_start + wave_height + 10
-        info_lines = [
-            f"Δf = {doppler_shift:+.2f} Hz",
-            f"Dirección: {direction}",
-            f"Vel. Radial: {vel_radial:+.2f} u/s"
-        ]
-        
-        for i, line in enumerate(info_lines):
-            info_text = font_label.render(line, True, (180, 180, 200))
-            screen.blit(info_text, (wave_panel_x + 15, info_y + i * 16))
-    else:
-        # Mensaje cuando no hay perturbación
-        no_perturb_y = wave_draw_y + wave_height + 50
-        msg_font = pygame.font.SysFont("Arial", 12)
-        msg = msg_font.render("Presiona 1, 2, 3 o A para perturbar el planeta", True, (150, 150, 180))
-        screen.blit(msg, (wave_panel_x + 30, no_perturb_y))
-        msg2 = msg_font.render("y observar el cambio en la señal Doppler", True, (150, 150, 180))
-        screen.blit(msg2, (wave_panel_x + 40, no_perturb_y + 20))
+        if len(points_history) > 1:
+            pygame.draw.lines(screen, history_color, False, points_history, 2)
+    
+    # Información adicional
+    info_y = graph_y_start + graph_height + 15
+    info_lines = [
+        f"v_radial observada: {vel_radial:+.2f} u/s  |  v_radial ideal: {vel_radial_ideal:+.2f} u/s",
+        f"Distancia Tierra-{selected_planet.name}: {dist_earth_planet:.1f} u"
+    ]
+    
+    for i, line in enumerate(info_lines):
+        info_text = font_label.render(line, True, (180, 180, 200))
+        screen.blit(info_text, (wave_panel_x + 15, info_y + i * 16))
 
 def draw_doppler_panel(screen, analyzers, font, font_small, perturbed_body, earth):
     panel_x = WIDTH - 420
@@ -686,7 +763,7 @@ def draw_doppler_panel(screen, analyzers, font, font_small, perturbed_body, eart
     for analyzer in analyzers:
         if not analyzer.involves_earth():
             continue
-        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning = analyzer.calculate_doppler_shift()
+        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning, freq_th_b1, freq_th_b2 = analyzer.calculate_doppler_shift()
         warning_level = analyzer.get_warning_level()
         
         if warning_level >= 2 or analyzer.orbital_anomaly_detected:
@@ -731,7 +808,7 @@ def draw_doppler_panel(screen, analyzers, font, font_small, perturbed_body, eart
             continue
         if analyzer.involves_earth():
             continue
-        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning = analyzer.calculate_doppler_shift()
+        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning, freq_th_b1, freq_th_b2 = analyzer.calculate_doppler_shift()
         
         if analyzer.orbital_anomaly_detected and analyzer.anomaly_level >= 2:
             anomalies.append((analyzer, doppler_b1, doppler_b2, vrad_b1, vrad_b2))
@@ -782,7 +859,7 @@ def draw_doppler_panel(screen, analyzers, font, font_small, perturbed_body, eart
         if analyzer.body1.is_sun or analyzer.body2.is_sun:
             continue
         
-        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning = analyzer.calculate_doppler_shift()
+        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning, freq_th_b1, freq_th_b2 = analyzer.calculate_doppler_shift()
         warning_level = analyzer.get_warning_level()
         
         if warning_level >= 2:
@@ -863,7 +940,7 @@ def draw_doppler_panel(screen, analyzers, font, font_small, perturbed_body, eart
             if analyzer.body1 != perturbed_body and analyzer.body2 != perturbed_body:
                 continue
             
-            doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning = analyzer.calculate_doppler_shift()
+            doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning, freq_th_b1, freq_th_b2 = analyzer.calculate_doppler_shift()
             warning_level = analyzer.get_warning_level()
             
             if warning_level >= 2:
@@ -908,7 +985,7 @@ def draw_doppler_visualization(screen, analyzers, scale, offset, perturbed_body,
         p1 = b1.pos * scale + offset
         p2 = b2.pos * scale + offset
         
-        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning = analyzer.calculate_doppler_shift()
+        doppler_b1, doppler_b2, vrad_b1, vrad_b2, dist, warning, freq_th_b1, freq_th_b2 = analyzer.calculate_doppler_shift()
         warning_level = analyzer.get_warning_level()
         
         vel_rel = b2.vel - b1.vel
@@ -1010,6 +1087,9 @@ def main():
     wave_fronts = []  # Lista de pulsos activos
     emission_interval = 8  # Emitir un pulso cada N frames (ajustable)
     
+    # Historial de frecuencias para gráfica temporal
+    frequency_history = []
+    
     perturbable_planets = [b for b in bodies if not b.is_sun and not b.is_station and b.name != "Tierra"]
     
     planet_keys = {}
@@ -1107,7 +1187,7 @@ def main():
                         else:
                             analyzer.collision_predicted = False
             
-            if perturbation_applied and target_planet and frame_count % 30 == 0:
+            if perturbation_applied and target_planet and frame_count % 10 == 0:
                 if show_predictions:
                     target_planet.future_positions = target_planet.predict_trajectory(bodies)
                     for pair in collision_pairs:
@@ -1145,8 +1225,8 @@ def main():
         collision_detected = draw_doppler_panel(screen, analyzers, font, font_small, 
                                                target_planet if perturbation_applied else None, earth)
         
-        # Visualización de ondas Doppler
-        draw_wave_visualization(screen, earth, target_planet, perturbation_applied, frame_count)
+        # Visualización de ondas Doppler (tiempo real)
+        draw_wave_visualization(screen, earth, target_planet, perturbation_applied, frame_count, frequency_history)
         
         if target_planet is None:
             status_text = "Selecciona un planeta (F1-F9)"
