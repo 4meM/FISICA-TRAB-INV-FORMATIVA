@@ -13,7 +13,9 @@ SOLAR_MASS = 5000
 DT = 0.025
 
 # Doppler Constants
-C_SIGNAL = 300.0
+# C_LUZ_ESCALADA representa la velocidad de la luz (ondas electromagnéticas/radar) escalada
+# para efectos de visualización. NO es sonido, ya que el sonido no se propaga en el vacío.
+C_LUZ_ESCALADA = 300.0
 FREQ_BASE = 100.0
 COLLISION_RADIUS = 15.0
 DOPPLER_HISTORY_SIZE = 150
@@ -22,6 +24,55 @@ PREDICTION_STEPS = 300
 # Perturbation Constants
 PERTURBATION_INTENSITY = 2.5
 PERTURBATION_ASTEROID_MASS = 3000
+
+class WaveFront:
+    """Representa un frente de onda electromagnética propagándose en el espacio."""
+    def __init__(self, position, color, emit_time):
+        self.origin = position.copy()  # Posición FIJA donde se emitió
+        self.radius = 0  # Radio actual del frente de onda
+        self.color = color
+        self.emit_time = emit_time
+        self.alpha = 255  # Transparencia inicial
+        self.alive = True
+    
+    def update(self, dt):
+        """Expande el frente de onda a velocidad de la luz escalada."""
+        self.radius += C_LUZ_ESCALADA * dt
+        
+        # Fade out progresivo
+        max_radius = 400  # Radio máximo antes de desvanecerse completamente
+        if self.radius > 200:
+            fade_factor = 1 - ((self.radius - 200) / (max_radius - 200))
+            self.alpha = max(0, int(255 * fade_factor * 0.6))
+        else:
+            self.alpha = int(255 * 0.6)
+        
+        # Eliminar si es invisible o demasiado grande
+        if self.radius > max_radius or self.alpha <= 0:
+            self.alive = False
+    
+    def draw(self, surface, scale, offset):
+        """Dibuja el frente de onda como círculo expandiéndose."""
+        if not self.alive or self.alpha <= 0:
+            return
+        
+        screen_x = int(self.origin[0] * scale + offset[0])
+        screen_y = int(self.origin[1] * scale + offset[1])
+        screen_radius = int(self.radius * scale)
+        
+        if screen_radius < 1:
+            return
+        
+        # Crear superficie temporal con transparencia
+        temp_surface = pygame.Surface((screen_radius * 2 + 4, screen_radius * 2 + 4), pygame.SRCALPHA)
+        
+        # Dibujar círculo con color y alpha
+        color_with_alpha = (*self.color, self.alpha)
+        pygame.draw.circle(temp_surface, color_with_alpha, 
+                          (screen_radius + 2, screen_radius + 2), screen_radius, 2)
+        
+        # Blit en la pantalla
+        surface.blit(temp_surface, (screen_x - screen_radius - 2, screen_y - screen_radius - 2))
 
 class DopplerAnalyzer:
     """Analyzes Doppler effect from Earth to predict collisions."""
@@ -55,9 +106,12 @@ class DopplerAnalyzer:
         
         if dist_earth_b1 > 0.1:
             unit_earth_b1 = diff_earth_b1 / dist_earth_b1
+            # Velocidad radial: positiva = alejándose, negativa = acercándose
             vel_radial_b1 = np.dot(self.body1.vel - self.earth.vel, unit_earth_b1)
-            # Doppler Formula: f_obs = f_0 * (c + v_obs) / c
-            freq_b1 = FREQ_BASE * (C_SIGNAL + vel_radial_b1) / C_SIGNAL
+            # Fórmula Doppler corregida: f_obs = f_0 * c / (c + v_radial)
+            # Si el objeto se aleja (+v), frecuencia disminuye (redshift)
+            # Si el objeto se acerca (-v), frecuencia aumenta (blueshift)
+            freq_b1 = FREQ_BASE * C_LUZ_ESCALADA / (C_LUZ_ESCALADA + vel_radial_b1)
         else:
             vel_radial_b1 = 0
             freq_b1 = FREQ_BASE
@@ -69,7 +123,8 @@ class DopplerAnalyzer:
         if dist_earth_b2 > 0.1:
             unit_earth_b2 = diff_earth_b2 / dist_earth_b2
             vel_radial_b2 = np.dot(self.body2.vel - self.earth.vel, unit_earth_b2)
-            freq_b2 = FREQ_BASE * (C_SIGNAL + vel_radial_b2) / C_SIGNAL
+            # Fórmula Doppler corregida (igual que para Body 1)
+            freq_b2 = FREQ_BASE * C_LUZ_ESCALADA / (C_LUZ_ESCALADA + vel_radial_b2)
         else:
             vel_radial_b2 = 0
             freq_b2 = FREQ_BASE
@@ -352,6 +407,7 @@ class Body:
             self.vel[1] = math.cos(self.orbital_angle) * v_orbital
             
         else:
+            # Euler Simpléctico (Symplectic Euler): mejor conservación de energía orbital
             self.acc = np.zeros(2, dtype=float)
             
             for other in bodies:
@@ -368,6 +424,7 @@ class Body:
                 
                 self.acc += f_vec / self.mass
 
+            # Primero actualizar velocidad, luego usar la nueva velocidad para actualizar posición
             self.vel += self.acc * DT
             self.pos += self.vel * DT
         
@@ -419,11 +476,164 @@ def apply_gravitational_perturbation(target_body, bodies):
         return asteroid_pos
     return None
 
+def update_and_draw_wave_fronts(screen, wave_fronts, scale, offset, dt):
+    """Actualiza y dibuja todos los frentes de onda propagándose."""
+    # Actualizar todos los pulsos
+    for wave in wave_fronts:
+        wave.update(dt)
+    
+    # Dibujar pulsos (de más antiguos a más recientes para mejor visualización)
+    for wave in wave_fronts:
+        if wave.alive:
+            wave.draw(screen, scale, offset)
+    
+    # Eliminar pulsos muertos
+    wave_fronts[:] = [w for w in wave_fronts if w.alive]
+
+def draw_wave_visualization(screen, earth, selected_planet, is_perturbed, frame_count):
+    """Dibuja ondas sinusoidales mostrando efecto Doppler normal vs perturbado."""
+    if selected_planet is None:
+        return
+    
+    # Panel de ondas
+    wave_panel_x = WIDTH - 420
+    wave_panel_y = 570
+    wave_panel_width = 410
+    wave_panel_height = 300
+    
+    # Fondo del panel
+    wave_surface = pygame.Surface((wave_panel_width, wave_panel_height))
+    wave_surface.set_alpha(220)
+    wave_surface.fill((10, 10, 20))
+    screen.blit(wave_surface, (wave_panel_x, wave_panel_y))
+    
+    pygame.draw.rect(screen, (100, 150, 255), (wave_panel_x, wave_panel_y, wave_panel_width, wave_panel_height), 2)
+    
+    # Título
+    font_wave = pygame.font.SysFont("Arial", 14, bold=True)
+    title = font_wave.render("VISUALIZACIÓN DE ONDAS DOPPLER", True, (100, 200, 255))
+    screen.blit(title, (wave_panel_x + 10, wave_panel_y + 8))
+    
+    # Calcular frecuencias
+    diff_earth_planet = selected_planet.pos - earth.pos
+    dist_earth_planet = np.linalg.norm(diff_earth_planet)
+    
+    if dist_earth_planet > 0.1:
+        unit_vec = diff_earth_planet / dist_earth_planet
+        vel_radial = np.dot(selected_planet.vel - earth.vel, unit_vec)
+        freq_observed = FREQ_BASE * C_LUZ_ESCALADA / (C_LUZ_ESCALADA + vel_radial)
+    else:
+        vel_radial = 0
+        freq_observed = FREQ_BASE
+    
+    doppler_shift = freq_observed - FREQ_BASE
+    
+    # Área de dibujo de ondas
+    wave_draw_y = wave_panel_y + 35
+    wave_height = 110
+    wave_center_y1 = wave_draw_y + wave_height // 2
+    wave_center_y2 = wave_draw_y + wave_height + 50 + wave_height // 2
+    
+    # --- ONDA NORMAL (baseline) ---
+    font_label = pygame.font.SysFont("Consolas", 11)
+    if not is_perturbed:
+        label = font_label.render(f"Señal Base: {FREQ_BASE:.1f} Hz (sin perturbación)", True, (100, 255, 100))
+    else:
+        label = font_label.render(f"Señal Base Original: {FREQ_BASE:.1f} Hz", True, (150, 150, 150))
+    screen.blit(label, (wave_panel_x + 15, wave_draw_y - 5))
+    
+    # Dibujar onda normal (verde) - ANIMADA EN TIEMPO REAL
+    points_normal = []
+    wave_width = wave_panel_width - 30
+    amplitude = 35
+    frequency_visual = 4  # Ciclos visuales
+    
+    # Animación de fase para onda normal
+    phase_shift_normal = (frame_count * 0.08) % (2 * math.pi)
+    
+    for x in range(wave_width):
+        angle = (x / wave_width) * frequency_visual * 2 * math.pi + phase_shift_normal
+        y = wave_center_y1 + amplitude * math.sin(angle)
+        points_normal.append((wave_panel_x + 15 + x, int(y)))
+    
+    if len(points_normal) > 1:
+        color_normal = (100, 255, 100) if not is_perturbed else (80, 100, 80)
+        pygame.draw.lines(screen, color_normal, False, points_normal, 2)
+    
+    # Línea central
+    pygame.draw.line(screen, (50, 50, 60), (wave_panel_x + 15, wave_center_y1), 
+                     (wave_panel_x + wave_panel_width - 15, wave_center_y1), 1)
+    
+    # --- ONDA PERTURBADA (si hay perturbación) ---
+    if is_perturbed:
+        perturbed_y_start = wave_draw_y + wave_height + 35
+        
+        # Determinar color según el cambio
+        if abs(doppler_shift) < 2:
+            color_perturbed = (255, 255, 100)  # Amarillo - cambio leve
+            status = "Cambio Leve"
+        elif abs(doppler_shift) < 8:
+            color_perturbed = (255, 180, 0)  # Naranja - cambio moderado
+            status = "Cambio Moderado"
+        else:
+            color_perturbed = (255, 50, 50)  # Rojo - cambio severo
+            status = "Cambio Severo"
+        
+        if vel_radial > 0:
+            direction = "Alejándose (Redshift)"
+        elif vel_radial < 0:
+            direction = "Acercándose (Blueshift)"
+        else:
+            direction = "Estable"
+        
+        label_perturbed = font_label.render(f"Señal Perturbada: {freq_observed:.1f} Hz ({status})", True, color_perturbed)
+        screen.blit(label_perturbed, (wave_panel_x + 15, perturbed_y_start - 5))
+        
+        # Dibujar onda perturbada con frecuencia modificada
+        points_perturbed = []
+        freq_ratio = freq_observed / FREQ_BASE
+        frequency_visual_perturbed = frequency_visual * freq_ratio
+        
+        # Animación de fase
+        phase_shift = (frame_count * 0.1) % (2 * math.pi)
+        
+        for x in range(wave_width):
+            angle = (x / wave_width) * frequency_visual_perturbed * 2 * math.pi + phase_shift
+            y = wave_center_y2 + amplitude * math.sin(angle)
+            points_perturbed.append((wave_panel_x + 15 + x, int(y)))
+        
+        if len(points_perturbed) > 1:
+            pygame.draw.lines(screen, color_perturbed, False, points_perturbed, 2)
+        
+        # Línea central
+        pygame.draw.line(screen, (50, 50, 60), (wave_panel_x + 15, wave_center_y2), 
+                         (wave_panel_x + wave_panel_width - 15, wave_center_y2), 1)
+        
+        # Información adicional
+        info_y = perturbed_y_start + wave_height + 10
+        info_lines = [
+            f"Δf = {doppler_shift:+.2f} Hz",
+            f"Dirección: {direction}",
+            f"Vel. Radial: {vel_radial:+.2f} u/s"
+        ]
+        
+        for i, line in enumerate(info_lines):
+            info_text = font_label.render(line, True, (180, 180, 200))
+            screen.blit(info_text, (wave_panel_x + 15, info_y + i * 16))
+    else:
+        # Mensaje cuando no hay perturbación
+        no_perturb_y = wave_draw_y + wave_height + 50
+        msg_font = pygame.font.SysFont("Arial", 12)
+        msg = msg_font.render("Presiona 1, 2, 3 o A para perturbar el planeta", True, (150, 150, 180))
+        screen.blit(msg, (wave_panel_x + 30, no_perturb_y))
+        msg2 = msg_font.render("y observar el cambio en la señal Doppler", True, (150, 150, 180))
+        screen.blit(msg2, (wave_panel_x + 40, no_perturb_y + 20))
+
 def draw_doppler_panel(screen, analyzers, font, font_small, perturbed_body, earth):
     panel_x = WIDTH - 420
     panel_y = 10
     panel_width = 410
-    panel_height = min(550, HEIGHT - 20)
+    panel_height = min(540, HEIGHT - 330)
     
     panel_surface = pygame.Surface((panel_width, panel_height))
     panel_surface.set_alpha(220)
@@ -444,6 +654,29 @@ def draw_doppler_panel(screen, analyzers, font, font_small, perturbed_body, eart
     
     pygame.draw.line(screen, (100, 150, 255), (panel_x + 10, y_offset), (panel_x + panel_width - 10, y_offset), 1)
     y_offset += 15
+    
+    # Leyenda de colores de frentes de onda
+    legend_title = font_small.render("🌊 FRENTES DE ONDA (Presiona W):", True, (150, 200, 255))
+    screen.blit(legend_title, (panel_x + 15, y_offset))
+    y_offset += 22
+    
+    legend_items = [
+        ((100, 200, 255), "Azul Claro: Frecuencia de referencia"),
+        ((100, 100, 255), "Azul: Corrimiento al azul (aproximación)"),
+        ((255, 100, 100), "Rojo: Corrimiento al rojo (alejamiento)"),
+        ((255, 255, 100), "Amarillo: Velocidad radial nula")
+    ]
+    
+    for color, text in legend_items:
+        # Círculo de muestra
+        pygame.draw.circle(screen, color, (panel_x + 25, y_offset + 6), 5, 2)
+        # Texto explicativo
+        legend_text = font_small.render(text, True, (180, 180, 180))
+        screen.blit(legend_text, (panel_x + 40, y_offset))
+        y_offset += 18
+    
+    pygame.draw.line(screen, (100, 150, 255), (panel_x + 10, y_offset + 5), (panel_x + panel_width - 10, y_offset + 5), 1)
+    y_offset += 20
     
     collision_detected = False
     shown_count = 0
@@ -766,11 +999,16 @@ def main():
     paused = False
     show_orbits = True
     show_predictions = True
+    show_wave_fronts = True  # Nueva opción
     frame_count = 0
     perturbation_applied = False
     asteroid_pos = None
     collision_pairs = []
     target_planet = None
+    
+    # Sistema de frentes de onda
+    wave_fronts = []  # Lista de pulsos activos
+    emission_interval = 8  # Emitir un pulso cada N frames (ajustable)
     
     perturbable_planets = [b for b in bodies if not b.is_sun and not b.is_station and b.name != "Tierra"]
     
@@ -799,6 +1037,8 @@ def main():
                     show_orbits = not show_orbits
                 elif event.key == pygame.K_p:
                     show_predictions = not show_predictions
+                elif event.key == pygame.K_w:
+                    show_wave_fronts = not show_wave_fronts
                 elif event.key in planet_keys:
                     target_planet = planet_keys[event.key]
                     perturbation_applied = False
@@ -825,6 +1065,33 @@ def main():
 
         if not paused:
             frame_count += 1
+            
+            # Emitir pulsos desde el planeta seleccionado o perturbado
+            if target_planet and frame_count % emission_interval == 0:
+                # Determinar color del pulso según estado
+                if perturbation_applied:
+                    # Color según velocidad relativa a la Tierra
+                    diff_earth = target_planet.pos - earth.pos
+                    dist_earth = np.linalg.norm(diff_earth)
+                    if dist_earth > 0.1:
+                        unit_vec = diff_earth / dist_earth
+                        vel_radial = np.dot(target_planet.vel - earth.vel, unit_vec)
+                        if vel_radial > 0.5:
+                            pulse_color = (255, 100, 100)  # Rojo - alejándose (Redshift)
+                        elif vel_radial < -0.5:
+                            pulse_color = (100, 100, 255)  # Azul - acercándose (Blueshift)
+                        else:
+                            pulse_color = (255, 255, 100)  # Amarillo - estable
+                    else:
+                        pulse_color = target_planet.color
+                else:
+                    pulse_color = (100, 200, 255)  # Azul claro - normal
+                
+                wave_fronts.append(WaveFront(target_planet.pos, pulse_color, frame_count))
+            
+            # Actualizar frentes de onda
+            if show_wave_fronts:
+                update_and_draw_wave_fronts(screen, wave_fronts, scale, offset, DT)
             
             for b in bodies:
                 b.update_physics(bodies)
@@ -878,6 +1145,9 @@ def main():
         collision_detected = draw_doppler_panel(screen, analyzers, font, font_small, 
                                                target_planet if perturbation_applied else None, earth)
         
+        # Visualización de ondas Doppler
+        draw_wave_visualization(screen, earth, target_planet, perturbation_applied, frame_count)
+        
         if target_planet is None:
             status_text = "Selecciona un planeta (F1-F9)"
             status_color = (150, 200, 255)
@@ -903,7 +1173,7 @@ def main():
             "",
             "CONTROLES:",
             "• ESPACIO: Pausar    R: Reiniciar",
-            "• O: Órbitas    P: Predicciones"
+            "• O: Órbitas    P: Predicciones    W: Frentes de Onda"
         ]
         
         y_ui = HEIGHT - 320
